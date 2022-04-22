@@ -1,0 +1,199 @@
+#!/bin/sh
+
+export POSIXLY_CORRENT=yes
+export LC_ALL=C
+
+COMMAND=""
+WIDTH=""
+TICKER=""
+A_DATETIME="0"
+B_DATETIME="9999-99-99 99:99:99"
+
+LOGS=""
+LOGS_GZ=""
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+    list-tick | profit | pos | last-price | hist-ord | graph-pos)
+        COMMAND="$1"
+        shift;;
+    -h | --help)
+        echo "tradelog [-h|--help] [FILTR] [PŘÍKAZ] [LOG [LOG2 [...]]"
+        echo ""
+        echo "PŘÍKAZ může být jeden z: "
+        echo "      list-tick – výpis seznamu vyskytujících se burzovních symbolů, tzv. \“tickerů\”."
+        echo "      profit – výpis celkového zisku z uzavřených pozic."
+        echo "      pos – výpis hodnot aktuálně držených pozic seřazených sestupně dle hodnoty."
+        echo "      last-price – výpis poslední známé ceny pro každý ticker."
+        echo "      hist-ord – výpis histogramu počtu transakcí dle tickeru."
+        echo "      graph-pos – výpis grafu hodnot držených pozic dle tickeru."
+        echo ""
+        echo "FILTR může být kombinace následujících: "
+        echo "      -a DATETIME – after: jsou uvažovány pouze záznamy PO tomto datu (bez tohoto data). DATETIME je formátu YYYY-MM-DD HH:MM:SS."
+        echo "      -b DATETIME – before: jsou uvažovány pouze záznamy PŘED tímto datem (bez tohoto data)."
+        echo "      -t TICKER – jsou uvažovány pouze záznamy odpovídající danému tickeru. Při více výskytech přepínače se bere množina všech uvedených tickerů."
+        echo "      -w WIDTH – u výpisu grafů nastavuje jejich šířku, tedy délku nejdelšího řádku na WIDTH. Tedy, WIDTH musí být kladné celé číslo. Více výskytů přepínače je chybné spuštění."
+        echo ""
+        echo "-h a --help vypíšou nápovědu s krátkým popisem každého příkazu a přepínače."
+        exit 0;;
+    -w)
+        if [ -z "$WIDTH" ]; then
+            WIDTH="$2"
+        else
+            echo "Paramert -w byl zadán vícekrát!" >&2
+            exit 1
+        fi
+        shift;shift;;
+    -t)
+        if [ -z "$TICKER" ]; then
+            TICKER="$2"
+        else
+            TICKER="$TICKER|$2"
+        fi
+        shift;shift;;
+    -a)
+        A_DATETIME="$2"
+        shift;shift;;
+    -b)
+        B_DATETIME="$2"
+        shift;shift;;
+
+    *.gz)
+        LOGS_GZ="$LOGS_GZ $1"
+        shift;;
+    *)
+        LOGS="$LOGS $1"
+        shift;;
+    esac
+done
+
+if [ -z "$LOGS" ] && [ -z "$LOGS_GZ" ]; then
+    INPUT="cat"
+elif [ -z "$LOGS_GZ" ]; then
+    INPUT="cat $LOGS"
+else
+    INPUT="gzip -dc $LOGS_GZ | cat $LOGS -"
+fi
+
+FILTERED_INPUT=$(eval "$INPUT" | awk -F ';' -v a="$A_DATETIME" -v b="$B_DATETIME" -v tick="$TICKER" '($1 > a) && ($1 < b) && (($2 ~ tick && tick ~ $2) || tick == "")  {print $0}')
+
+
+case "$COMMAND" in
+    list-tick)
+        TICKERS=$(echo "$FILTERED_INPUT" | awk -F ';' '{print $2}')
+        echo "$TICKERS" | sort -u
+        ;;
+    profit)
+        BUY_SUM=$(echo "$FILTERED_INPUT" | awk -F ';' '$3 ~ /buy/ {sum += $4*$6} END {printf "%.2f", sum}')
+        SELL_SUM=$(echo "$FILTERED_INPUT" | awk -F ';' '$3 ~ /sell/ {sum += $4*$6} END {printf "%.2f", sum}')
+        awk -v buy="$BUY_SUM" -v sell="$SELL_SUM" 'BEGIN {printf "%.2f\n", sell-buy}'
+        ;;
+    pos)
+        POS=$(echo "$FILTERED_INPUT" | awk -F ';' '{
+            last[$2] = $4
+            ($3 == "buy") ? amount[$2] += $6 : amount[$2] -= $6
+        } 
+        END {
+            for(i in amount){
+                abc = sprintf("%.2f", amount[i]*last[i])
+                if(len < length(abc)){
+                    len = length(abc)
+                }
+            }
+            for(i in amount){
+                printf "%-9s : %*.2f\n", i, len, amount[i]*last[i]
+            }
+            
+        }' | sort -nr -k 3)
+        echo "$POS"
+        ;;
+    last-price)
+        LAST_PRICES=$(echo "$FILTERED_INPUT" | awk -F ';' '{
+            last[$2] = $4
+        }
+        END {
+            for(i in last){
+                if(len < length(last[i])){
+                    len = length(last[i])
+                }
+            }
+            for(i in last){
+                printf "%-9s : %*.2f\n", i, len, last[i]
+            }
+        }' | sort)
+        echo "$LAST_PRICES"
+        ;;
+    hist-ord)
+        HIST_ORD=$(echo "$FILTERED_INPUT" | awk -F ';' -v width="$WIDTH" '{
+            ticker[$2] += 1
+        } 
+        END{
+            for(i in ticker){
+                if(longest < ticker[i]){
+                    longest = ticker[i]
+                }
+            }
+            ratio = 1
+            if(width != ""){
+                ratio = longest/width
+            }
+            for(i in ticker){
+                printf "%-9s :", i
+                if(ticker[i]/ratio >= 1){
+                    printf " "
+                }
+                for(j = 0; j <= ticker[i]/ratio-1; j++){
+                    printf "#"
+                }
+
+                printf "\n"
+            }
+        }' | sort)
+        echo "$HIST_ORD"
+        ;;
+    graph-pos)
+        GRAPH=$(echo "$FILTERED_INPUT" | awk -F ';' -v width="$WIDTH" '{
+            last[$2] = $4
+            ($3 == "buy") ? amount[$2] += $6 : amount[$2] -= $6
+        }
+        END {
+            for(i in last){
+                profit[i] = amount[i]*last[i]
+            }
+            for(i in profit){
+                abs_profit = (profit[i] < 0) ? (-profit[i]) : (profit[i])
+                if(longest < abs_profit){
+                    longest = abs_profit
+                }
+            }
+            ratio = 1000
+            if(width != ""){
+                ratio = longest/width
+            }
+            for(i in profit){
+                printf "%-9s :", i
+                if(profit[i] > 0){
+                    if(profit[i]/ratio >= 1){
+                        printf " "
+                    }
+                    for(j = 0; j <= profit[i]/ratio-1; j++){
+                        printf "#"
+                    }
+                }
+                else{
+                    if(profit[i]/ratio <= -1){
+                        printf " "
+                    }
+                    for(j = 0; j <= -profit[i]/ratio-1; j++){
+                        printf "!"
+                    }
+                }
+                printf "\n"
+            }
+        }' | sort)
+        echo "$GRAPH"
+        ;;
+    *) 
+        echo "$FILTERED_INPUT"
+        ;;
+esac
